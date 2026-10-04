@@ -1,0 +1,4 @@
+docs/
+notebooks/__pycache__/
+notebooks/media/
+generated_manim_scene.py
