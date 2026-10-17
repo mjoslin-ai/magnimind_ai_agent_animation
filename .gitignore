@@ -1,4 +1,5 @@
 docs/
-notebooks/__pycache__/
-notebooks/media/
-generated_manim_scene.py
+notebooks/tmp_manim/
+notebooks/videos/
+src/tmp_manim/
+src/videos/
