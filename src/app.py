@@ -7,6 +7,8 @@ import shutil
 import logging
 import tempfile
 import subprocess
+from pathlib import Path
+from dotenv import load_dotenv
 from datetime import datetime
 from typing import List, Optional, Dict, Any, TypedDict
 from pydantic import BaseModel, Field
@@ -53,6 +55,7 @@ class AnimationState(TypedDict):
     error_message: Optional[str]
     retry_count: int
     target_duration: float
+    enable_voiceover: bool
 
 # --- Helper Function ---
 def _extract_text(content) -> str:
@@ -82,7 +85,7 @@ def extract_scenario_node(state: AnimationState) -> Dict[str, Any]:
     - storyboard: 4-6 chronological sections, each with:
       * section_name: Name of section
       * time_range: Estimated timing
-      * narration: Explanation text
+      * narration: Natural spoken explanation text suitable for text-to-speech voiceover (complete sentences, clear, engaging, no bullet points or stage directions)
       * visuals: What appears on screen
       * animations: Specific transitions
     The ENTIRE animation must total approximately {target_duration} seconds. Distribute the time evenly (or with natural pacing) across the sections.
@@ -120,8 +123,42 @@ def generate_code_node(state: AnimationState) -> Dict[str, Any]:
     scenario = state["scenario"]
     prompt = state["prompt"]
     complexity = state["complexity"]
+    enable_voiceover = state.get("enable_voiceover", True)
     
-    system_prompt = """
+    if enable_voiceover:
+        system_prompt = """
+    Create professional Manim animation code in Python that visualizes the requested topic clearly and elegantly,
+    WITH SYNCHRONIZED VOICEOVER NARRATION using the manim-voiceover plugin.
+
+    Your code MUST:
+    1. Start with these exact imports:
+       from manim import *
+       from manim_voiceover import VoiceoverScene
+       from manim_voiceover.services.gtts import GTTSService
+    2. Create a Scene class named 'ManimScene' that extends VoiceoverScene (NOT Scene).
+    3. In construct(self):
+         - Call self.set_speech_service(GTTSService(lang="en", tld="com")) as the FIRST line.
+         - Structure the entire animation around the provided storyboard sections.
+         - For EACH storyboard section, wrap the visual animations of that section inside:
+               with self.voiceover(text="<exact narration text from storyboard>") as tracker:
+                   ... animations here, using run_time=tracker.duration where appropriate ...
+         - Use the EXACT "narration" strings from the storyboard for the voiceover text. Do not invent new narration.
+         - Prefer matching animation duration to the spoken narration via tracker.duration.
+         - After a section's voiceover block finishes, FadeOut previous elements before the next section.
+    4. CRITICAL CONSTANTS & API RULES:
+       - DO NOT use 'CENTER'. Use 'ORIGIN' for centering objects.
+       - Text objects do not take an 'alignment' argument. For center-aligned paragraphs, use Paragraph(..., alignment="center").
+       - Never call self.clear(). Always use explicit FadeOut / Uncreate.
+    5. Explicitly position elements using move_to(), shift(), or to_edge() to avoid overlaps.
+    6. Return ONLY valid Python code inside ```python markdown blocks. No extra conversational filler.
+    7. Use ONLY objects, methods and constants that exist in the official Manim Community API + manim-voiceover.
+    8. TIMING:
+        - Voiceover duration largely determines total length. Aim for roughly {target_duration} seconds overall.
+        - Keep visual pacing natural; do not force long silent waits.
+        - Typical structure: 4-6 voiceover sections corresponding 1:1 to the storyboard.
+    """
+    else:
+        system_prompt = """
     Create professional Manim animation code in Python that visualizes the requested topic clearly and elegantly. Your code MUST:
     1. Use 'from manim import *' at the top.
     2. Create a Scene class named 'ManimScene' extending Scene.
@@ -148,7 +185,7 @@ def generate_code_node(state: AnimationState) -> Dict[str, Any]:
                  f"Transformations: {scenario.get('transformations')}\n"
                  f"Complexity: {complexity}\n"
                  f"Target duration: {state['target_duration']} seconds\n"
-                 f"Storyboard: {scenario.get('storyboard')}")
+                 f"Storyboard (USE THE 'narration' FIELDS EXACTLY FOR VOICEOVER):\n{json.dumps(scenario.get('storyboard'), indent=2)}")
     ]
     
     response = llm.invoke(messages)
@@ -165,12 +202,18 @@ def optimize_layout_node(state: AnimationState) -> Dict[str, Any]:
     logger.info("--- NODE: Optimize Layout ---")
     llm = get_llm()
     code = state["raw_code"]
+    enable_voiceover = state.get("enable_voiceover", True)
     
     system_prompt = """
     Review the provided Manim code and ensure optimal layout and flow:
     1. Check for proper spacing (at least 2.0 units between active elements).
     2. Ensure proper cleanup of past elements using FadeOut before introducing new concepts.
-    3. Return ONLY the polished Python code inside ```python markdown blocks.
+    3. If the code uses VoiceoverScene / manim-voiceover:
+       - Keep every with self.voiceover(...) as tracker: block intact.
+       - Prefer run_time=tracker.duration for major animations inside each voiceover block.
+       - Do not remove set_speech_service or the VoiceoverScene inheritance.
+       - Do not invent new narration text; keep existing voiceover text strings.
+    4. Return ONLY the polished Python code inside ```python markdown blocks.
     """
     
     messages = [
@@ -192,6 +235,7 @@ def validate_code_node(state: AnimationState) -> Dict[str, Any]:
     logger.info("--- NODE: Validate Manim Code (AST & Rules Check) ---")
     code = state["final_code"]
     errors = []
+    enable_voiceover = state.get("enable_voiceover", True)
     
     try:
         ast.parse(code)
@@ -202,13 +246,21 @@ def validate_code_node(state: AnimationState) -> Dict[str, Any]:
         errors.append("Missing required import: 'from manim import *'")
         
     if "class " not in code or "Scene" not in code:
-        errors.append("Missing Manim Scene class definition (e.g., class MyScene(Scene):)")
+        errors.append("Missing Manim Scene class definition (e.g., class ManimScene(Scene): or VoiceoverScene)")
         
     if "self.clear()" in code:
         errors.append("Forbidden method call detected: 'self.clear()' is not supported; use explicit FadeOut animations.")
         
     if "CENTER" in code:
         errors.append("Invalid constant 'CENTER': Manim uses 'ORIGIN' for the center point.")
+
+    if enable_voiceover:
+        if "VoiceoverScene" not in code:
+            errors.append("Voiceover enabled but code does not inherit from VoiceoverScene.")
+        if "set_speech_service" not in code:
+            errors.append("Voiceover enabled but set_speech_service(...) is missing.")
+        if "self.voiceover" not in code:
+            errors.append("Voiceover enabled but no self.voiceover(...) blocks found.")
         
     if errors:
         error_msg = "; ".join(errors)
@@ -224,21 +276,27 @@ def fix_code_node(state: AnimationState) -> Dict[str, Any]:
     code = state["final_code"]
     error_msg = state.get("error_message") or "Unknown validation or runtime error."
     retry_count = state.get("retry_count", 0) + 1
+    enable_voiceover = state.get("enable_voiceover", True)
     
     system_prompt = """
-    You are an expert Manim and Python debugging assistant.
+    You are an expert Manim and Python debugging assistant (including manim-voiceover).
     Fix the provided Manim code by addressing all identified issues. Follow these guidelines:
     1. Fix all syntax errors and logical mistakes first
     2. Fix positioning issues by adding explicit positioning commands
     3. Resolve element overlaps by repositioning elements with adequate spacing
     4. Maintain the original educational intent and mathematical content
     5. Ensure all animations follow a logical step-by-step flow
+    6. If voiceover is expected:
+       - Class must inherit from VoiceoverScene
+       - Must call self.set_speech_service(GTTSService(...)) early in construct
+       - Keep / restore with self.voiceover(text=...) as tracker: blocks using the original narration strings
+       - Prefer run_time=tracker.duration inside those blocks
     Return ONLY the corrected, valid Python code inside ```python markdown blocks.
     """
     
     messages = [
         ("system", system_prompt),
-        ("user", f"Code with error:\n```python\n{code}\n```\n\nValidation Errors / Feedback:\n{error_msg}")
+        ("user", f"Code with error:\n```python\n{code}\n```\n\nValidation Errors / Feedback:\n{error_msg}\n\nVoiceover enabled: {enable_voiceover}")
     ]
     
     response = llm.invoke(messages)
@@ -287,7 +345,8 @@ def render_manim_video(code: str, quality: str = "medium_quality") -> str:
     }
     flag, quality_dir = quality_flags.get(quality, ("-qm", "720p30"))
     
-    command = ["manim", flag, "script.py", class_name]
+    # --disable_caching is required for reliable manim-voiceover audio generation
+    command = ["manim", flag, "--disable_caching", "script.py", class_name]
     logger.info(f"Executing command: {' '.join(command)} in {temp_dir}")
     
     result = subprocess.run(
@@ -384,19 +443,38 @@ def get_compiled_workflow():
 
 # --- Streamlit UI Layout ---
 st.title("🎬 Manim AI Animation Agent")
-st.markdown("Transform any topic into a professional math or computer science animation using **LangGraph**, **Gemini**, and **Manim**.")
+st.markdown(
+    "Transform any topic into a professional math or computer science animation using **LangGraph**, **Gemini**, and **Manim**. "
+    "Voiceovers are generated from the storyboard narration via **manim-voiceover** + gTTS."
+)
 
 with st.sidebar:
     st.header("🔑 Configuration")
-    api_key_input = st.text_input("Google Gemini API Key", type="password", value=os.environ.get("GOOGLE_API_KEY", ""))
-    if api_key_input:
-        os.environ["GOOGLE_API_KEY"] = api_key_input
+    # Check if the key exists in the environment (from virtual environment)
+    env_api_key = os.environ.get("GOOGLE_API_KEY", "")
+
+    use_api_key = st.checkbox(
+        "Use Google Gemini API Key from Environment",
+        value=True if env_api_key else False,
+        help="Enable this if you already set GOOGLE_API_KEY in your virtual environment"
+    )
+
+    if use_api_key and env_api_key:
+        st.success("API key loaded from environment")
+    elif use_api_key and not env_api_key:
+        st.warning("No API key found in environment variables")
+    else:
+        st.info("API key is disabled")
         
     st.divider()
     st.header("⚙️ Animation Settings")
     complexity_choice = st.selectbox("Complexity", ["simple", "medium", "complex"], index=1)
     quality_choice = st.selectbox("Render Quality", ["low_quality", "medium_quality", "high_quality"], index=1)
     target_dur = st.slider("Target Duration (seconds)", min_value=30.0, max_value=120.0, value=90.0, step=10.0)
+    enable_voiceover = st.checkbox(
+        "🎙️ Add Voiceover",
+        value=True
+    )
 
 # Main Form Input
 topic_input = st.text_input("Enter Topic or Concept to Animate:", placeholder="e.g., How Dijkstra's Algorithm Works")
@@ -421,7 +499,8 @@ if st.button("🚀 Generate Animation", type="primary"):
             "video_path": "",
             "is_valid": True,
             "error_message": None,
-            "retry_count": 0
+            "retry_count": 0,
+            "enable_voiceover": enable_voiceover,
         }
         
         with st.status("🤖 Running Multi-Agent Workflow...", expanded=True) as status:
