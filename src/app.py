@@ -8,7 +8,7 @@ import logging
 import tempfile
 import subprocess
 from pathlib import Path
-#from dotenv import load_dotenv
+from dotenv import load_dotenv
 from datetime import datetime
 from typing import List, Optional, Dict, Any, TypedDict
 from pydantic import BaseModel, Field
