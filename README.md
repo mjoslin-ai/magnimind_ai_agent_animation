@@ -1,4 +1,4 @@
-# 🎬 Manim AI Agent Generator
+# 🎬 Manim AI Agent Animation
 
 An intelligent, multi-agent application that transforms any educational topic, mathematical concept, or computer science algorithm into a professional, high-quality video animation using **LangGraph**, **Google Gemini**, and **Manim**. It also features automated voiceover generation via **manim-voiceover** and gTTS.
 
